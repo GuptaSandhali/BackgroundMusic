@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, send_file
 import requests
 import os
 import tempfile
-from pydub import AudioSegment
+import subprocess
 import io
 from urllib.parse import urlparse, parse_qs
 import uuid
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Fixed background music URL (replace with your actual background music Google Drive link)
+# Fixed background music URL
 BACKGROUND_MUSIC_URL = "https://drive.google.com/file/d/1Q-wkYSYpyR9_vC0DCvJr0wYAmgyVg5lJ/view?usp=sharing"
 
 def download_from_gdrive(share_url, output_path):
@@ -90,18 +90,53 @@ def download_from_url(url, output_path):
         logger.error(f"Error downloading from URL: {str(e)}")
         return False
 
+def mix_audio_with_ffmpeg(voice_file, bg_file, output_file, voice_vol=0, bg_vol=-12):
+    """Mix audio using FFmpeg directly"""
+    try:
+        # FFmpeg command to mix audio
+        cmd = [
+            'ffmpeg', '-y',  # -y to overwrite output file
+            '-i', voice_file,     # Input 1: voice
+            '-i', bg_file,        # Input 2: background music
+            '-filter_complex', 
+            f'[0:a]volume={voice_vol}dB[voice];[1:a]volume={bg_vol}dB,aloop=loop=-1:size=2e+09[bg];[voice][bg]amix=inputs=2:duration=first[out]',
+            '-map', '[out]',
+            '-c:a', 'mp3',
+            '-b:a', '128k',
+            output_file
+        ]
+        
+        logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
+        
+        # Run FFmpeg
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        if result.returncode == 0:
+            logger.info("FFmpeg mixing completed successfully")
+            return True
+        else:
+            logger.error(f"FFmpeg error: {result.stderr}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        logger.error("FFmpeg process timed out")
+        return False
+    except Exception as e:
+        logger.error(f"Error running FFmpeg: {str(e)}")
+        return False
+
 @app.route('/', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "service": "Audio Mixer API",
-        "version": "1.0"
+        "service": "Audio Mixer API (FFmpeg)",
+        "version": "2.0"
     })
 
 @app.route('/mix-audio', methods=['POST'])
 def mix_audio():
-    """Mix voice audio with background music"""
+    """Mix voice audio with background music using FFmpeg"""
     try:
         # Get JSON data from request
         data = request.get_json()
@@ -148,32 +183,15 @@ def mix_audio():
             if not bg_success:
                 return jsonify({"error": "Failed to download background music"}), 500
             
-            # Load audio files
-            logger.info("Loading audio files...")
-            voice = AudioSegment.from_file(voice_file)
-            background = AudioSegment.from_file(bg_music_file)
+            # Mix audio using FFmpeg
+            logger.info("Mixing audio with FFmpeg...")
+            mix_success = mix_audio_with_ffmpeg(
+                voice_file, bg_music_file, output_file, 
+                voice_volume, background_volume
+            )
             
-            # Apply volume adjustments
-            logger.info("Adjusting audio levels...")
-            voice = voice + voice_volume  # Apply voice volume adjustment
-            background = background + background_volume  # Apply background volume adjustment
-            
-            # Match duration - loop background music if needed
-            if len(background) < len(voice):
-                logger.info("Looping background music to match voice duration...")
-                loops_needed = len(voice) // len(background) + 1
-                background = background * loops_needed
-            
-            # Trim background to exact voice length
-            background = background[:len(voice)]
-            
-            # Mix audio
-            logger.info("Mixing audio...")
-            mixed = voice.overlay(background)
-            
-            # Export mixed audio
-            logger.info("Exporting mixed audio...")
-            mixed.export(output_file, format=output_format, bitrate="128k")
+            if not mix_success:
+                return jsonify({"error": "Failed to mix audio"}), 500
             
             # Read the mixed file for response
             with open(output_file, 'rb') as f:
@@ -206,18 +224,6 @@ def mix_audio():
             
     except Exception as e:
         logger.error(f"Error in mix_audio: {str(e)}")
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/mix-audio-url', methods=['POST'])
-def mix_audio_return_url():
-    """Mix audio and return a temporary URL (alternative endpoint)"""
-    try:
-        # This endpoint would be useful if you want to return a URL instead of direct file
-        # For now, it redirects to the main mixing endpoint
-        return mix_audio()
-        
-    except Exception as e:
-        logger.error(f"Error in mix_audio_return_url: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 if __name__ == '__main__':
